@@ -1,0 +1,1 @@
+pyinstaller --onefile --name repair_bt_mouse --hidden-import winrt.windows.devices.enumeration --hidden-import winrt.windows.devices.bluetooth --hidden-import winrt.windows.foundation --hidden-import winrt.windows.foundation.collections mouse_pairing_dualboot.py
