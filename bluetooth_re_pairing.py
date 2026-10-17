@@ -2,11 +2,11 @@
 """
 Bluetooth device control for Windows, macOS and Linux.
 
-  python mouse_pairing_dualboot.py
+  python bluetooth_re-pairing.py
       Scans for 10 seconds, lets you pick a device, removes it and pairs it
       again, then saves the device so --service can handle it later.
 
-  python mouse_pairing_dualboot.py --service
+  python bluetooth_re-pairing.py --service
       Removes and re-pairs every saved device, with no menu and no prompts.
 
 Requirements per platform
@@ -98,6 +98,14 @@ def load_devices():
         return []
 
 
+def write_devices(devices):
+    path = config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
+    return path
+
+
 def save_device(mac, name):
     devices = load_devices()
     entry = {
@@ -111,12 +119,13 @@ def save_device(mac, name):
             break
     else:
         devices.append(entry)
-    path = config_path()
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
-    return path
+    return write_devices(devices)
 
+
+def forget_device(mac):
+    """Remove a device from the saved list (does not touch the Bluetooth pairing)."""
+    devices = [d for d in load_devices() if norm_mac(d.get("mac")) != norm_mac(mac)]
+    return write_devices(devices)
 
 # --------------------------------------------------------------------------
 # Linux (BlueZ)
@@ -173,6 +182,11 @@ class LinuxBackend:
                 continue
             out.append({"mac": mac, "name": name, "paired": mac in paired})
         return out
+
+    def is_connected(self, mac):
+        _, out = self._ctl("info", mac)
+        m = re.search(r"Connected:\s*(yes|no)", out)
+        return bool(m and m.group(1) == "yes")
 
     def find_known(self, mac):
         return [(m, n) for m, n in self._devices().items()
@@ -257,6 +271,10 @@ class MacBackend:
                                 "paired": False}
         return [d for d in devices.values() if d["name"]]
 
+    def is_connected(self, mac):
+        rc, out = self._run("--is-connected", mac)
+        return rc == 0 and out.strip() == "1"
+
     def find_known(self, mac):
         return [(d["address"], d.get("name") or "?") for d in self._json("--paired")
                 if norm_mac(d["address"]) == norm_mac(mac)]
@@ -326,7 +344,7 @@ class WindowsBackend:
         """Preferred: association-endpoint enumeration (paired + nearby)."""
         di = self.en.DeviceInformation
         kind = self.en.DeviceInformationKind.ASSOCIATION_ENDPOINT
-        props = ["System.Devices.Aep.IsPresent"]
+        props = ["System.Devices.Aep.IsPresent", "System.Devices.Aep.IsConnected"]
         for name in self.KIND_FN_CANDIDATES:
             fn = getattr(di, name, None)
             if fn is None:
@@ -401,6 +419,16 @@ class WindowsBackend:
             if time.time() >= deadline:
                 break
         return list(seen.values())
+
+    def is_connected(self, mac):
+        """True / False, or None when Windows does not report the state."""
+        for i in self._enumerate():
+            if i.pairing.is_paired and self._same_device(i, mac):
+                try:
+                    return bool(i.properties["System.Devices.Aep.IsConnected"])
+                except Exception:
+                    return None
+        return False
 
     def find_known(self, mac):
         return [(i.id, i.name) for i in self._enumerate(max_age=60)
