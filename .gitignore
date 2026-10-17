@@ -2,3 +2,7 @@ dist
 build
 BluetoothDevice.spec
 app_icon.png
+CACHEDIR.TAG
+pyvenv.cfg
+lib
+__pycache__

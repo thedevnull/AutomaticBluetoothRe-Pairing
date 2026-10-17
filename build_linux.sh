@@ -13,7 +13,7 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 APP_NAME="${APP_NAME:-BluetoothDeviceControl}"
 GUI="${GUI:-bt_device_control_gui.py}"
-CORE="${CORE:-bluetooth_re-pairing.py}"
+CORE="${CORE:-bluetooth_re_pairing.py}"
 QT_PACKAGE="${QT_PACKAGE:-PySide6}"      # PySide6 or PyQt6
 USE_VENV="${USE_VENV:-1}"                # 1 = private venv in .venv-build
 ONEFILE="${ONEFILE:-1}"                  # 1 = single file, 0 = folder
@@ -104,7 +104,7 @@ if [ "$SMOKE_TEST" = "1" ]; then
     fi
 fi
 
-cat <<EOF
+cat <<EOT
 
 Notes
   * Build on the oldest distro you want to support: the binary runs on the
@@ -113,4 +113,4 @@ Notes
     "AppIndicator and KStatusNotifierItem Support" extension.
   * If you enabled Start at login, the binary path is stored in
     ~/.config/autostart. If you move the binary, turn the option off and on.
-EOF
+EOT

@@ -17,7 +17,7 @@ set "QT_PACKAGE=PySide6"
 rem 1 = build inside a private virtual environment (.venv-build)
 set "USE_VENV=0"
 rem 1 = build WITH a console window (use it to see errors), 0 = no console
-set "CONSOLE=1"
+set "CONSOLE=0"
 rem 1 = start the finished exe once with --help to check that it launches
 set "SMOKE_TEST=1"
 rem Extra PyInstaller options, for example: --collect-submodules winrt

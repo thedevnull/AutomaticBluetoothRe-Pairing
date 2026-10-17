@@ -9,9 +9,13 @@ Keep this file in the same folder as bluetooth_re_pairing.py (the core).
     python  bt_device_control_gui.py          (Linux / macOS)
 
 Options
-    --autostart   start hidden in the tray and, after a short delay, run the
-                  service: re-pair every saved device that is not connected.
-                  This is the command the "Start at login" option registers.
+    --autostart   start hidden in the tray only (no window). This is the
+                  command the "Start at login" option registers.
+
+Automatic re-pairing is a separate option ("Re-pair all saved devices
+automatically when the program starts"). When it is checked, the program
+re-pairs every saved device each time it starts (manual start or login).
+When it is not checked, nothing is paired until you ask for it.
 """
 
 import argparse
@@ -61,6 +65,7 @@ APP_TITLE = "Bluetooth Device Control"
 AUTOSTART_NAME = "BTDeviceControl"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_DELAY_S = 20      # let Windows/Bluetooth settle after login
+MANUAL_START_DELAY_S = 2    # delay when the program is opened by hand
 CONNECT_CHECKS = 3          # tries before deciding a device is not connected
 CONNECT_GAP_S = 4
 SERVER_NAME = "bt_device_control_single_instance"
@@ -74,7 +79,7 @@ def settings_path():
 
 
 def load_settings():
-    settings = {"skip_connected": True}
+    settings = {"skip_connected": True, "auto_repair": False}
     try:
         with open(settings_path(), encoding="utf-8") as f:
             settings.update(json.load(f))
@@ -374,11 +379,15 @@ class MainWindow(QMainWindow):
 
         # --- options
         self.chk_autostart = QCheckBox(
-            "Start automatically at login (runs in the tray and re-pairs saved devices)")
+            "Start automatically at login (hidden in the tray)")
+        self.chk_auto_repair = QCheckBox(
+            "Re-pair all saved devices automatically when the program starts")
+        self.chk_auto_repair.setChecked(bool(settings.get("auto_repair", False)))
         self.chk_skip = QCheckBox(
             "Skip saved devices that are already connected (recommended)")
         self.chk_skip.setChecked(bool(settings.get("skip_connected", True)))
         root.addWidget(self.chk_autostart)
+        root.addWidget(self.chk_auto_repair)
         root.addWidget(self.chk_skip)
 
         # --- log
@@ -431,6 +440,7 @@ class MainWindow(QMainWindow):
         self.btn_service.clicked.connect(self.run_service)
         self.chk_autostart.toggled.connect(self.on_autostart)
         self.chk_skip.toggled.connect(self.on_skip_toggled)
+        self.chk_auto_repair.toggled.connect(self.on_auto_repair_toggled)
         ctl.scanned.connect(self.populate_nearby)
         ctl.busy_changed.connect(self.set_busy)
         ctl.saved_changed.connect(self.refresh_saved)
@@ -533,12 +543,20 @@ class MainWindow(QMainWindow):
     def run_service(self, *_):
         self.ctl.service(self.chk_skip.isChecked())
 
-    def on_skip_toggled(self, checked):
-        self.settings["skip_connected"] = bool(checked)
+    def _save_setting(self, key, value):
+        self.settings[key] = bool(value)
         try:
             save_settings(self.settings)
         except OSError as e:
             print(f"[!] Could not save settings: {e}")
+
+    def on_skip_toggled(self, checked):
+        self._save_setting("skip_connected", checked)
+
+    def on_auto_repair_toggled(self, checked):
+        self._save_setting("auto_repair", checked)
+        print(f"[*] Automatic re-pairing at startup: "
+              f"{'enabled' if checked else 'disabled'}")
 
     # ---- autostart
     @staticmethod
@@ -607,7 +625,7 @@ class MainWindow(QMainWindow):
 def main():
     ap = argparse.ArgumentParser(description=APP_TITLE)
     ap.add_argument("--autostart", action="store_true",
-                    help="start hidden in the tray and run the service")
+                    help="start hidden in the tray (used by Start at login)")
     args, qt_args = ap.parse_known_args()
 
     app = QApplication([sys.argv[0], *qt_args])
@@ -639,9 +657,12 @@ def main():
     print(f"[*] Platform: {platform.system()}")
     print(f"[*] Saved devices file: {core.config_path()}")
 
-    if args.autostart:
-        print(f"[*] Autostart: running the service in {AUTOSTART_DELAY_S}s ...")
-        QTimer.singleShot(AUTOSTART_DELAY_S * 1000, window.run_service)
+    if window.settings.get("auto_repair"):
+        delay = AUTOSTART_DELAY_S if args.autostart else MANUAL_START_DELAY_S
+        print(f"[*] Automatic re-pairing is ON: starting in {delay}s ...")
+        QTimer.singleShot(delay * 1000, window.run_service)
+    else:
+        print("[*] Automatic re-pairing is OFF: use the buttons to re-pair manually.")
     if not (args.autostart and window.tray):
         window.show()
 
