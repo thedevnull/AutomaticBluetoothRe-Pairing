@@ -6,3 +6,4 @@ CACHEDIR.TAG
 pyvenv.cfg
 lib
 __pycache__
+.tools/appimagetool-x86_64.AppImage

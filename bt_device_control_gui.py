@@ -100,6 +100,9 @@ def save_settings(settings):
 # --------------------------------------------------------------------------
 def launch_command():
     """Command line used to start this program at login."""
+    appimage = os.environ.get("APPIMAGE")           # running inside an AppImage
+    if appimage:                                    # sys.executable is a temp mount
+        return [appimage, "--autostart"]
     if getattr(sys, "frozen", False):               # PyInstaller build
         return [sys.executable, "--autostart"]
     exe = sys.executable

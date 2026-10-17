@@ -35,6 +35,24 @@ import sys
 import time
 from datetime import datetime
 
+
+
+def host_env():
+    """Environment for system programs such as bluetoothctl.
+
+    Frozen builds (PyInstaller / AppImage) point LD_LIBRARY_PATH at the
+    bundled libraries, which can break the host's own binaries.
+    """
+    env = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        orig = env.pop("LD_LIBRARY_PATH_ORIG", None)
+        if orig is not None:
+            env["LD_LIBRARY_PATH"] = orig
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
 SCAN_TIME = 10        # seconds spent listing devices (interactive mode)
 PAIR_TIMEOUT = 45     # seconds to wait for the device to appear in pairing mode
 APP_NAME = "bt_device_control"
@@ -140,7 +158,7 @@ class LinuxBackend:
     def _ctl(self, *args, timeout=30):
         try:
             r = subprocess.run(["bluetoothctl", *args], capture_output=True,
-                               text=True, timeout=timeout)
+                               text=True, timeout=timeout, env=host_env())
             return r.returncode, (r.stdout + r.stderr).strip()
         except subprocess.TimeoutExpired:
             return 124, "timeout"
@@ -169,7 +187,8 @@ class LinuxBackend:
     def list_devices(self, timeout):
         scan = subprocess.Popen(
             ["bluetoothctl", "--timeout", str(timeout), "scan", "on"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=host_env())
         try:
             scan.wait(timeout=timeout + 5)
         except subprocess.TimeoutExpired:
@@ -201,7 +220,8 @@ class LinuxBackend:
     def discover(self, mac, timeout):
         scan = subprocess.Popen(
             ["bluetoothctl", "--timeout", str(timeout), "scan", "on"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=host_env())
         found = None
         deadline = time.time() + timeout
         try:
