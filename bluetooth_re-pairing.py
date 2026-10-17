@@ -62,6 +62,12 @@ def mac_from_id(dev_id):
     return m.group(1).upper() if m else None
 
 
+def clean_name(name):
+    """Drop unprintable/replacement characters and surrounding spaces."""
+    return "".join(ch for ch in (name or "")
+                   if ch.isprintable() and ch != "\ufffd").strip()
+
+
 def indent(text):
     return "    " + text.replace("\n", "\n    ") if text else ""
 
@@ -308,6 +314,7 @@ class WindowsBackend:
                 "winrt-Windows.Devices.Enumeration winrt-Windows.Devices.Bluetooth")
         self.en = en
         self.infos = {}
+        self._enum_time = 0.0
 
     # ---- enumeration -----------------------------------------------------
     def _run_find(self, fn, *args):
@@ -349,11 +356,15 @@ class WindowsBackend:
                     print(f"    (selector {cls.__name__}/paired={paired} failed: {e})")
         return list(found.values())
 
-    def _enumerate(self):
+    def _enumerate(self, max_age=0):
+        """Enumerate devices; reuse the last result if it is younger than max_age s."""
+        if max_age and self.infos and time.time() - self._enum_time < max_age:
+            return list(self.infos.values())
         infos = self._enumerate_aep()
         if infos is None:
             infos = self._enumerate_bluetooth_selectors()
         self.infos = {i.id: i for i in infos}
+        self._enum_time = time.time()
         return infos
 
     def _is_present(self, info):
@@ -392,7 +403,7 @@ class WindowsBackend:
         return list(seen.values())
 
     def find_known(self, mac):
-        return [(i.id, i.name) for i in self._enumerate()
+        return [(i.id, i.name) for i in self._enumerate(max_age=60)
                 if i.pairing.is_paired and self._same_device(i, mac)]
 
     def remove(self, ids):
@@ -404,9 +415,6 @@ class WindowsBackend:
             res = asyncio.run(self._await(info.pairing.unpair_async()))
             print(f"    Result: {res.status.name}"
                   + ("" if res.status in ok else "  (failed)"))
-        # Give Windows time to drop the old bond / cached entry
-        print("[*] Waiting for Windows to forget the old device ...")
-        time.sleep(4)
 
     def discover(self, mac, timeout):
         deadline = time.time() + timeout
@@ -418,7 +426,7 @@ class WindowsBackend:
                 if self._is_present(i) is False:
                     continue
                 return i.id, i.name
-            time.sleep(1)
+            time.sleep(0.5)
         return None
 
     def _pair_custom(self, info):
@@ -457,7 +465,8 @@ class WindowsBackend:
             if attempt > 1:
                 print(f"    Retry {attempt}/{attempts} (keep the device in pairing mode) ...")
                 time.sleep(3)
-            self._enumerate()
+            if attempt > 1 or dev_id not in self.infos:
+                self._enumerate()
             info = self.infos.get(dev_id)
             if info is None:
                 print("    Device not visible anymore; is it still in pairing mode?")
@@ -466,7 +475,7 @@ class WindowsBackend:
             if info.pairing.is_paired:
                 print("    Stale pairing record found; unpairing it first ...")
                 asyncio.run(self._await(info.pairing.unpair_async()))
-                time.sleep(4)
+                time.sleep(2)
                 self._enumerate()
                 info = self.infos.get(dev_id)
                 if info is None:
@@ -509,18 +518,28 @@ def get_backend():
 
 def repair_device(be, mac, name):
     """Remove the device (if present) and pair it again. Returns True on success."""
+    name = clean_name(name) or fmt_mac(mac)
     print(f"\n=== {name} ({fmt_mac(mac)}) ===")
+    print("[*] Put the device in pairing mode NOW (hold its pairing/Connect button")
+    print("    until the LED blinks fast). The scan starts right after the removal.")
+    t_start = t = time.time()
+
+    def lap(label):
+        nonlocal t
+        now = time.time()
+        print(f"    [{label}: {now - t:.1f}s]")
+        t = now
+
     known = be.find_known(mac)
     if known:
         be.remove([dev_id for dev_id, _ in known])
     else:
         print("[!] Not paired on this system; going straight to pairing.")
+    lap("remove")
 
-    time.sleep(1)
-
-    print(f"[*] Scanning up to {PAIR_TIMEOUT}s. Put the device in pairing mode now")
-    print("    (mouse: hold the Connect button until the LED blinks fast).")
+    print(f"[*] Scanning for the device (up to {PAIR_TIMEOUT}s) ...")
     found = be.discover(mac, PAIR_TIMEOUT)
+    lap("scan")
     if not found:
         print("[x] Device not found. Make sure it is in pairing mode and try again.")
         return False
@@ -528,11 +547,11 @@ def repair_device(be, mac, name):
     print(f"[+] Found: {dev_name}")
 
     print("[*] Pairing ...")
-    if be.pair(dev_id):
-        print("[+] Done! The device is paired.")
-        return True
-    print("[x] Pairing failed.")
-    return False
+    ok = be.pair(dev_id)
+    lap("pair")
+    print(f"[+] Done! The device is paired. (total {time.time() - t_start:.1f}s)"
+          if ok else "[x] Pairing failed.")
+    return ok
 
 
 def choose_device(be):
@@ -541,6 +560,9 @@ def choose_device(be):
         print(f"[*] Scanning for {SCAN_TIME}s ...")
         print("    (new devices must be in pairing mode to show up)")
         devices = be.list_devices(SCAN_TIME)
+        for d in devices:
+            d["name"] = clean_name(d["name"])
+        devices = [d for d in devices if re.search(r"\w", d["name"])]
         devices.sort(key=lambda d: (not d["paired"], d["name"].lower()))
 
         if devices:
