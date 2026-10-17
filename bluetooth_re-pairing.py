@@ -1,65 +1,115 @@
 #!/usr/bin/env python3
 """
-Remove and re-pair a Bluetooth mouse on Windows, macOS or Linux.
+Bluetooth device control for Windows, macOS and Linux.
 
-Default target: "Bluetooth Mouse M336/M337/M535" (Logitech)
+  python mouse_pairing_dualboot.py
+      Scans for 10 seconds, lets you pick a device, removes it and pairs it
+      again, then saves the device so --service can handle it later.
+
+  python mouse_pairing_dualboot.py --service
+      Removes and re-pairs every saved device, with no menu and no prompts.
 
 Requirements per platform
 -------------------------
 Windows : Python 3.9+ and
-          pip install winrt-runtime winrt-Windows.Foundation \
-                      winrt-Windows.Foundation.Collections \
-                      winrt-Windows.Devices.Enumeration \
+          pip install winrt-runtime winrt-Windows.Foundation ^
+                      winrt-Windows.Foundation.Collections ^
+                      winrt-Windows.Devices.Enumeration ^
                       winrt-Windows.Devices.Bluetooth
-macOS   : Homebrew package "blueutil"   ->  brew install blueutil
-Linux   : BlueZ (bluetoothctl)          ->  sudo apt install bluez
+macOS   : brew install blueutil
+Linux   : sudo apt install bluez
 
-Usage
------
-    python repair_bt_mouse_crossplatform.py
-    python repair_bt_mouse_crossplatform.py --name "Bluetooth Mouse"
-    python repair_bt_mouse_crossplatform.py --mac AA:BB:CC:DD:EE:FF
-    python repair_bt_mouse_crossplatform.py --scan-time 60
+Saved devices live in a per-OS config file (printed when a device is saved),
+so run the program once in each OS you dual-boot.
 """
 
 import argparse
 import asyncio
 import json
+import os
 import platform
 import re
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime
 
-DEFAULT_NAME = "Bluetooth Mouse M336/M337/M535"
+SCAN_TIME = 10        # seconds spent listing devices (interactive mode)
+PAIR_TIMEOUT = 45     # seconds to wait for the device to appear in pairing mode
+APP_NAME = "bt_device_control"
+
+MAC_AT_END_RE = re.compile(r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*$")
 
 
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
-def name_matches(candidate, wanted):
-    """True if `candidate` looks like the wanted mouse.
-
-    The advertised name is often just "Bluetooth Mouse M336" (or M337/M535),
-    so we also accept the shared prefix plus any of the listed model numbers.
-    """
-    c, w = (candidate or "").lower(), wanted.lower()
-    if not c:
-        return False
-    if w in c or c in w:
-        return True
-    models = re.findall(r"m\d{3}", w)
-    prefix = re.sub(r"\s*m\d{3}.*$", "", w).strip()
-    return bool(prefix) and prefix in c and any(m in c for m in models)
-
-
 def norm_mac(mac):
-    return re.sub(r"[^0-9a-f]", "", mac.lower())
+    return re.sub(r"[^0-9a-f]", "", (mac or "").lower())
+
+
+def fmt_mac(mac):
+    n = norm_mac(mac).upper()
+    if len(n) != 12:
+        return mac
+    return ":".join(n[i:i + 2] for i in range(0, 12, 2))
+
+
+def mac_from_id(dev_id):
+    """Windows ids look like 'Bluetooth#Bluetooth<adapter>-<device mac>'."""
+    m = MAC_AT_END_RE.search(dev_id or "")
+    return m.group(1).upper() if m else None
 
 
 def indent(text):
     return "    " + text.replace("\n", "\n    ") if text else ""
+
+
+# --------------------------------------------------------------------------
+# Saved devices
+# --------------------------------------------------------------------------
+def config_path():
+    system = platform.system()
+    if system == "Windows":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif system == "Darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, APP_NAME, "devices.json")
+
+
+def load_devices():
+    path = config_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return list(json.load(f).get("devices", []))
+    except FileNotFoundError:
+        return []
+    except (json.JSONDecodeError, OSError, AttributeError) as e:
+        print(f"[!] Could not read {path}: {e}")
+        return []
+
+
+def save_device(mac, name):
+    devices = load_devices()
+    entry = {
+        "name": name,
+        "mac": fmt_mac(mac),
+        "last_paired": datetime.now().isoformat(timespec="seconds"),
+    }
+    for i, d in enumerate(devices):
+        if norm_mac(d.get("mac")) == norm_mac(mac):
+            devices[i] = entry
+            break
+    else:
+        devices.append(entry)
+    path = config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
+    return path
 
 
 # --------------------------------------------------------------------------
@@ -80,8 +130,7 @@ class LinuxBackend:
         except subprocess.TimeoutExpired:
             return 124, "timeout"
 
-    def _devices(self):
-        _, out = self._ctl("devices")
+    def _parse(self, out):
         devs = {}
         for line in out.splitlines():
             m = self.DEVICE_RE.match(line.strip())
@@ -89,13 +138,39 @@ class LinuxBackend:
                 devs[m.group(1).upper()] = m.group(2).strip()
         return devs
 
+    def _devices(self):
+        return self._parse(self._ctl("devices")[1])
+
+    def _paired_macs(self):
+        for cmd in (("paired-devices",), ("devices", "Paired")):
+            found = self._parse(self._ctl(*cmd)[1])
+            if found:
+                return set(found)
+        return set()
+
     def prepare(self):
         self._ctl("power", "on")
 
-    def find_known(self, name, mac):
+    def list_devices(self, timeout):
+        scan = subprocess.Popen(
+            ["bluetoothctl", "--timeout", str(timeout), "scan", "on"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            scan.wait(timeout=timeout + 5)
+        except subprocess.TimeoutExpired:
+            scan.terminate()
+        self._ctl("scan", "off")
+        paired = self._paired_macs()
+        out = []
+        for mac, name in self._devices().items():
+            if norm_mac(name) == norm_mac(mac):   # unnamed device
+                continue
+            out.append({"mac": mac, "name": name, "paired": mac in paired})
+        return out
+
+    def find_known(self, mac):
         return [(m, n) for m, n in self._devices().items()
-                if (mac and norm_mac(m) == norm_mac(mac))
-                or (not mac and name_matches(n, name))]
+                if norm_mac(m) == norm_mac(mac)]
 
     def remove(self, ids):
         for mac in ids:
@@ -103,7 +178,7 @@ class LinuxBackend:
             self._ctl("disconnect", mac)
             print(indent(self._ctl("remove", mac)[1]))
 
-    def discover(self, name, mac, timeout):
+    def discover(self, mac, timeout):
         scan = subprocess.Popen(
             ["bluetoothctl", "--timeout", str(timeout), "scan", "on"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -113,8 +188,7 @@ class LinuxBackend:
             while time.time() < deadline and not found:
                 time.sleep(2)
                 for m, n in self._devices().items():
-                    if (mac and norm_mac(m) == norm_mac(mac)) or \
-                       (not mac and name_matches(n, name)):
+                    if norm_mac(m) == norm_mac(mac):
                         found = (m, n)
                         break
         finally:
@@ -160,18 +234,26 @@ class MacBackend:
         except json.JSONDecodeError:
             return []
 
-    @staticmethod
-    def _match(d, name, mac):
-        if mac:
-            return norm_mac(d.get("address", "")) == norm_mac(mac)
-        return name_matches(d.get("name"), name)
-
     def prepare(self):
         self._run("--power", "1")
 
-    def find_known(self, name, mac):
-        return [(d["address"], d.get("name") or "?")
-                for d in self._json("--paired") if self._match(d, name, mac)]
+    def list_devices(self, timeout):
+        devices = {}
+        for d in self._json("--paired"):
+            devices[norm_mac(d["address"])] = {
+                "mac": d["address"], "name": d.get("name") or "", "paired": True}
+        for d in self._json("--inquiry", str(timeout), timeout=timeout + 20):
+            key = norm_mac(d["address"])
+            if key in devices:
+                devices[key]["name"] = devices[key]["name"] or d.get("name") or ""
+            else:
+                devices[key] = {"mac": d["address"], "name": d.get("name") or "",
+                                "paired": False}
+        return [d for d in devices.values() if d["name"]]
+
+    def find_known(self, mac):
+        return [(d["address"], d.get("name") or "?") for d in self._json("--paired")
+                if norm_mac(d["address"]) == norm_mac(mac)]
 
     def remove(self, ids):
         for addr in ids:
@@ -179,12 +261,12 @@ class MacBackend:
             self._run("--disconnect", addr)
             print(indent(self._run("--unpair", addr)[1]))
 
-    def discover(self, name, mac, timeout):
+    def discover(self, mac, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
             secs = max(3, min(8, int(deadline - time.time())))
             for d in self._json("--inquiry", str(secs), timeout=secs + 20):
-                if self._match(d, name, mac):
+                if norm_mac(d["address"]) == norm_mac(mac):
                     return d["address"], d.get("name") or "?"
         return None
 
@@ -206,6 +288,15 @@ class WindowsBackend:
     AQS = ('(System.Devices.Aep.ProtocolId:="{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}" '
            'OR System.Devices.Aep.ProtocolId:="{bb7bb05e-5972-42b5-94fc-76eaa7084d49}")')
 
+    # Names the "kind-aware" overload may have in the Python projection
+    # (dir() does not list WinRT static methods, so we probe with getattr).
+    KIND_FN_CANDIDATES = (
+        "find_all_async_with_kind_aqs_filter_and_additional_properties",
+        "find_all_async_with_kind_and_additional_properties",
+    )
+
+    open_settings_on_failure = True   # service mode turns this off
+
     def __init__(self):
         try:
             from winrt.windows.devices import enumeration as en
@@ -218,13 +309,7 @@ class WindowsBackend:
         self.en = en
         self.infos = {}
 
-    # Names the "kind-aware" overload may have in the Python projection
-    # (dir() does not list WinRT static methods, so we probe with getattr).
-    KIND_FN_CANDIDATES = (
-        "find_all_async_with_kind_aqs_filter_and_additional_properties",
-        "find_all_async_with_kind_and_additional_properties",
-    )
-
+    # ---- enumeration -----------------------------------------------------
     def _run_find(self, fn, *args):
         async def go():
             return await fn(*args)
@@ -271,29 +356,44 @@ class WindowsBackend:
         self.infos = {i.id: i for i in infos}
         return infos
 
-    def _match(self, info, name, mac):
-        if mac:
-            return norm_mac(mac) in norm_mac(info.id)
-        return name_matches(info.name, name)
-
-    def prepare(self):
-        pass  # Windows manages the adapter itself; make sure Bluetooth is ON.
-
-    def find_known(self, name, mac):
-        return [(i.id, i.name) for i in self._enumerate()
-                if i.pairing.is_paired and self._match(i, name, mac)]
-
     def _is_present(self, info):
         """True if Windows currently sees the device in range (None if unknown)."""
         try:
-            val = info.properties["System.Devices.Aep.IsPresent"]
-            return bool(val)
+            return bool(info.properties["System.Devices.Aep.IsPresent"])
         except Exception:
             return None
 
     @staticmethod
+    def _same_device(info, mac):
+        return norm_mac(mac_from_id(info.id)) == norm_mac(mac)
+
+    @staticmethod
     async def _await(op):
         return await op
+
+    # ---- backend interface ----------------------------------------------
+    def prepare(self):
+        pass  # Windows manages the adapter itself; make sure Bluetooth is ON.
+
+    def list_devices(self, timeout):
+        deadline = time.time() + timeout
+        seen = {}
+        while True:
+            for i in self._enumerate():
+                mac = mac_from_id(i.id)
+                if not mac or not i.name:
+                    continue
+                paired = bool(i.pairing.is_paired)
+                if self._is_present(i) is False and not paired:
+                    continue   # stale cache entry of a device that is not around
+                seen[norm_mac(mac)] = {"mac": mac, "name": i.name, "paired": paired}
+            if time.time() >= deadline:
+                break
+        return list(seen.values())
+
+    def find_known(self, mac):
+        return [(i.id, i.name) for i in self._enumerate()
+                if i.pairing.is_paired and self._same_device(i, mac)]
 
     def remove(self, ids):
         ok = {self.en.DeviceUnpairingResultStatus.UNPAIRED,
@@ -308,13 +408,13 @@ class WindowsBackend:
         print("[*] Waiting for Windows to forget the old device ...")
         time.sleep(4)
 
-    def discover(self, name, mac, timeout):
+    def discover(self, mac, timeout):
         deadline = time.time() + timeout
         while time.time() < deadline:
             for i in self._enumerate():
-                if not self._match(i, name, mac):
+                if not self._same_device(i, mac):
                     continue
-                # Ignore stale cache entries: the mouse must really be in range
+                # Ignore stale cache entries: the device must really be in range
                 if self._is_present(i) is False:
                     continue
                 return i.id, i.name
@@ -355,7 +455,7 @@ class WindowsBackend:
         attempts = 3
         for attempt in range(1, attempts + 1):
             if attempt > 1:
-                print(f"    Retry {attempt}/{attempts} (keep the mouse in pairing mode) ...")
+                print(f"    Retry {attempt}/{attempts} (keep the device in pairing mode) ...")
                 time.sleep(3)
             self._enumerate()
             info = self.infos.get(dev_id)
@@ -373,7 +473,7 @@ class WindowsBackend:
                     print("    Device not visible after unpair; keep pairing mode on.")
                     continue
             if attempt == 1:
-                # Custom pairing is the most reliable way to pair classic mice
+                # Custom pairing is the most reliable way to pair classic devices
                 print("    Using custom pairing (auto-accepting any confirmation/PIN) ...")
                 res = self._pair_custom(info)
             else:
@@ -382,19 +482,19 @@ class WindowsBackend:
             print(f"    Result: {res.status.name}")
             if res.status in ok:
                 return True
-        # Last resort: open Windows' own Bluetooth page
-        try:
-            import os
-            os.startfile("ms-settings:bluetooth")
-            print("    Opened Windows Bluetooth settings: click 'Add device' > 'Bluetooth'.")
-        except Exception:
-            pass
-        print("    Tip: also remove the mouse manually in Settings > Bluetooth & devices,")
-        print("    then run this script again right after the LED starts blinking.")
+        if self.open_settings_on_failure:
+            try:
+                os.startfile("ms-settings:bluetooth")
+                print("    Opened Windows Bluetooth settings: Add device > Bluetooth.")
+            except Exception:
+                pass
+        print("    Tip: also remove the device manually in Settings > Bluetooth & devices,")
+        print("    then run again right after the LED starts blinking.")
         return False
 
+
 # --------------------------------------------------------------------------
-# Main
+# Main flow
 # --------------------------------------------------------------------------
 def get_backend():
     system = platform.system()
@@ -407,44 +507,110 @@ def get_backend():
     sys.exit(f"Unsupported platform: {system}")
 
 
+def repair_device(be, mac, name):
+    """Remove the device (if present) and pair it again. Returns True on success."""
+    print(f"\n=== {name} ({fmt_mac(mac)}) ===")
+    known = be.find_known(mac)
+    if known:
+        be.remove([dev_id for dev_id, _ in known])
+    else:
+        print("[!] Not paired on this system; going straight to pairing.")
+
+    time.sleep(1)
+
+    print(f"[*] Scanning up to {PAIR_TIMEOUT}s. Put the device in pairing mode now")
+    print("    (mouse: hold the Connect button until the LED blinks fast).")
+    found = be.discover(mac, PAIR_TIMEOUT)
+    if not found:
+        print("[x] Device not found. Make sure it is in pairing mode and try again.")
+        return False
+    dev_id, dev_name = found
+    print(f"[+] Found: {dev_name}")
+
+    print("[*] Pairing ...")
+    if be.pair(dev_id):
+        print("[+] Done! The device is paired.")
+        return True
+    print("[x] Pairing failed.")
+    return False
+
+
+def choose_device(be):
+    """Scan, list, and let the user pick one. Returns a device dict or None."""
+    while True:
+        print(f"[*] Scanning for {SCAN_TIME}s ...")
+        print("    (new devices must be in pairing mode to show up)")
+        devices = be.list_devices(SCAN_TIME)
+        devices.sort(key=lambda d: (not d["paired"], d["name"].lower()))
+
+        if devices:
+            print("\nDevices found:")
+            for n, d in enumerate(devices, 1):
+                tag = "paired" if d["paired"] else "new"
+                print(f"  {n:>2}. {d['name']}  [{fmt_mac(d['mac'])}]  ({tag})")
+        else:
+            print("\nNo devices found.")
+
+        try:
+            choice = input("\nNumber to select, r to rescan, q to quit: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if choice == "q":
+            return None
+        if choice == "r" or not choice:
+            continue
+        if choice.isdigit() and 1 <= int(choice) <= len(devices):
+            return devices[int(choice) - 1]
+        print("Invalid choice.\n")
+
+
+def run_interactive(be):
+    device = choose_device(be)
+    if device is None:
+        print("Nothing selected.")
+        return 0
+    if not repair_device(be, device["mac"], device["name"]):
+        return 1
+    path = save_device(device["mac"], device["name"])
+    print(f"[+] Device saved in {path}")
+    return 0
+
+
+def run_service(be):
+    devices = load_devices()
+    if not devices:
+        print(f"[x] No saved devices in {config_path()}.")
+        print("    Run without --service first to add one.")
+        return 1
+
+    # No pop-ups in unattended mode
+    be.open_settings_on_failure = False
+
+    results = []
+    for d in devices:
+        ok = repair_device(be, d["mac"], d.get("name") or d["mac"])
+        if ok:
+            save_device(d["mac"], d.get("name") or d["mac"])   # refresh timestamp
+        results.append((d.get("name") or d["mac"], ok))
+
+    print("\nSummary:")
+    for name, ok in results:
+        print(f"  [{'OK' if ok else 'FAILED'}] {name}")
+    return 0 if all(ok for _, ok in results) else 1
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Remove and re-pair a Bluetooth mouse.")
-    ap.add_argument("--name", default=DEFAULT_NAME, help="device name to look for")
-    ap.add_argument("--mac", help="device MAC address (skips name matching)")
-    ap.add_argument("--scan-time", type=int, default=45, help="seconds to scan")
+    ap = argparse.ArgumentParser(
+        description="Bluetooth device control: remove and re-pair devices.")
+    ap.add_argument("--service", action="store_true",
+                    help="re-pair every saved device, without menus or prompts")
     args = ap.parse_args()
 
     be = get_backend()
     print(f"[*] Platform: {platform.system()}")
     be.prepare()
-
-    # 1. Remove the existing pairing
-    known = be.find_known(args.name, args.mac)
-    if known:
-        for dev_id, n in known:
-            print(f"[*] Found paired device: {n}  ({dev_id})")
-        be.remove([d for d, _ in known])
-    else:
-        print("[!] No existing paired device found; continuing to pairing.")
-
-    time.sleep(1)
-
-    # 2. Scan for the mouse in pairing mode
-    print(f"[*] Scanning up to {args.scan_time}s. Put the mouse in pairing mode now")
-    print("    (hold the Connect button on the bottom until the LED blinks fast).")
-    found = be.discover(args.name, args.mac, args.scan_time)
-    if not found:
-        sys.exit("[x] Mouse not found. Make sure it is in pairing mode and try again.")
-    dev_id, dev_name = found
-    print(f"[+] Found: {dev_name}")
-
-    # 3. Pair
-    print("[*] Pairing ...")
-    if be.pair(dev_id):
-        print("[+] Done! The mouse is paired.")
-    else:
-        sys.exit("[x] Pairing failed. Try again with the mouse in pairing mode.")
+    return run_service(be) if args.service else run_interactive(be)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
