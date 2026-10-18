@@ -3,7 +3,9 @@
 Draws the program icon (blue circle with the Bluetooth rune) and saves it as
 app_icon.ico and app_icon.png next to this file.
 
-build_windows.bat runs it automatically. It is optional: if it fails, the
+Usage: make_app_icon.py [output_dir]   (default: next to this file)
+
+build_windows.bat and build_appimage.sh run it automatically. It is optional: if it fails, the
 exe is simply built with the default icon.
 """
 
@@ -48,7 +50,9 @@ def draw(size):
 
 def main():
     app = QGuiApplication(sys.argv[:1])   # noqa: F841  (needed by Qt)
-    here = os.path.dirname(os.path.abspath(__file__))
+    here = (os.path.abspath(sys.argv[1]) if len(sys.argv) > 1
+            else os.path.dirname(os.path.abspath(__file__)))
+    os.makedirs(here, exist_ok=True)
     image = draw(256)
     ok = True
     for name in ("app_icon.png", "app_icon.ico"):

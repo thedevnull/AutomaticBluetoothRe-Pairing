@@ -9,6 +9,7 @@ Keep this file in the same folder as bluetooth_re_pairing.py (the core).
     python  bt_device_control_gui.py          (Linux / macOS)
 
 Options
+    --version     print the version and exit
     --autostart   start hidden in the tray only (no window). This is the
                   command the "Start at login" option registers.
 
@@ -30,6 +31,25 @@ import sys
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+
+__version__ = "1.0.0"
+APP_TITLE = "Bluetooth Device Control"
+
+
+def build_parser():
+    ap = argparse.ArgumentParser(description=APP_TITLE)
+    ap.add_argument("--autostart", action="store_true",
+                    help="start hidden in the tray (used by Start at login)")
+    ap.add_argument("--version", action="version",
+                    version=f"{APP_TITLE} {__version__}")
+    return ap
+
+
+# --help / --version must work without a display and without the system
+# libraries Qt needs (CI runners, minimal containers), so they are handled
+# here, BEFORE Qt is imported.
+if __name__ == "__main__" and {"-h", "--help", "--version"} & set(sys.argv[1:]):
+    build_parser().parse_known_args()
 
 try:
     from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -61,7 +81,6 @@ try:
 except ImportError:
     sys.exit("bluetooth_re_pairing.py must be in the same folder as this file.")
 
-APP_TITLE = "Bluetooth Device Control"
 AUTOSTART_NAME = "BTDeviceControl"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 AUTOSTART_DELAY_S = 20      # let Windows/Bluetooth settle after login
@@ -626,10 +645,7 @@ class MainWindow(QMainWindow):
 # Entry point
 # --------------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description=APP_TITLE)
-    ap.add_argument("--autostart", action="store_true",
-                    help="start hidden in the tray (used by Start at login)")
-    args, qt_args = ap.parse_known_args()
+    args, qt_args = build_parser().parse_known_args()
 
     app = QApplication([sys.argv[0], *qt_args])
     app.setApplicationName(APP_TITLE)
