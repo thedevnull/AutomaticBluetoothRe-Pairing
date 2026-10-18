@@ -24,6 +24,8 @@ GUI="${GUI:-bt_device_control_gui.py}"
 CORE="${CORE:-bluetooth_re_pairing.py}"
 ICON_SCRIPT="${ICON_SCRIPT:-make_app_icon.py}"
 QT_PACKAGE="${QT_PACKAGE:-PySide6}"      # PySide6 or PyQt6
+QT_SPEC="${QT_SPEC:-$QT_PACKAGE}"        # pip spec, e.g. "PySide6<6.5" (Qt 6.4 needs no xcb-cursor)
+EXTRA_LIBS="${EXTRA_LIBS:-}"             # more host libraries to bundle, e.g. "libEGL.so.1 libGL.so.1"
 USE_VENV="${USE_VENV:-1}"                # 1 = private venv
 VENV_DIR="${VENV_DIR:-.venv-build}"
 SMOKE_TEST="${SMOKE_TEST:-1}"            # 1 = start the AppImage once with --version
@@ -33,13 +35,13 @@ ARCH="${ARCH:-$(uname -m)}"              # x86_64, aarch64, ...
 
 # ---- Catalog / AppStream metadata (EDIT THESE for AppImageHub) ----------
 # APP_ID must be a reverse-DNS name you control, e.g. io.github.<user>.<App>
-APP_ID="${APP_ID:-io.github.thedevnull.BluetoothDeviceControl}"
+APP_ID="${APP_ID:-io.github.SEUUSUARIO.BluetoothDeviceControl}"
 APP_LICENSE="${APP_LICENSE:-MIT}"        # SPDX id of YOUR license
-APP_URL="${APP_URL:-https://github.com/thedevnull/BluetoothDeviceControl}"
-APP_SUMMARY="${APP_SUMMARY:-Manage Bluetooth devices and easy re-pairing from the system tray}"
+APP_URL="${APP_URL:-https://github.com/SEUUSUARIO/SEUREPO}"
+APP_SUMMARY="${APP_SUMMARY:-Re-pair Bluetooth devices from the system tray}"
 SCREENSHOT_URL="${SCREENSHOT_URL:-}"     # optional https URL of a screenshot
 GLIBC_MAX="${GLIBC_MAX:-2.35}"           # oldest glibc you want to support (Ubuntu 22.04)
-STRICT_GLIBC="${STRICT_GLIBC:-0}"        # 1 = fail instead of warn when glibc is too new
+STRICT_GLIBC="${STRICT_GLIBC:-1}"        # 1 = fail when glibc is too new (0 = only warn, local use)
 LINT="${LINT:-0}"                        # 1 = run appimagelint on the result (if installed)
 
 ICON_NAME="bt-device-control"
@@ -119,7 +121,7 @@ info "appimagetool: $APPIMAGETOOL"
 # ---- Build dependencies ----------------------------------------------
 info "Installing build dependencies (the first run takes a while) ..."
 "$PYTHON" -m pip install --upgrade pip >/dev/null 2>&1 || true
-"$PYTHON" -m pip install --upgrade pyinstaller "$QT_PACKAGE" \
+"$PYTHON" -m pip install --upgrade pyinstaller "$QT_SPEC" \
     || die "pip failed. On Debian/Ubuntu keep USE_VENV=1 (system pip is locked)."
 
 # ---- PyInstaller (folder mode: an AppImage is already a single file) ----
@@ -128,6 +130,7 @@ info "Installing build dependencies (the first run takes a while) ..."
 #  --exclude-module     PyInstaller aborts if two Qt bindings are installed
 #  --noupx              UPX-compressed Qt libraries break at run time
 rm -rf build/pyi-dist build/pyi-work "$APPDIR"
+rm -f "$OUT"    # never leave an old AppImage behind if this build stops early
 ARGS=(--noconfirm --clean --noupx
       --name "$APP_NAME"
       --distpath build/pyi-dist --workpath build/pyi-work
@@ -150,14 +153,84 @@ info "Building the program with PyInstaller ..."
 BUNDLE="build/pyi-dist/$APP_NAME"
 [ -x "$BUNDLE/$APP_NAME" ] || die "PyInstaller build failed. Read the messages above."
 
+# ---- AppDir ------------------------------------------------------------
+info "Assembling the AppDir ..."
+mkdir -p "$APPDIR/usr/bin"
+cp -a "$BUNDLE" "$APPDIR/usr/bin/$APP_NAME"
+
+# ---- Fallback libraries ---------------------------------------------------
+# PyInstaller leaves some system libraries out on purpose (libGL, libEGL ...)
+# and the Qt plugins need many more (libxcb-*, libxkbcommon ...). A minimal
+# system (CI runner, container, bare window manager) may lack them, and the
+# program then dies at import time. So every library the bundle needs from
+# THIS system is stored as a fallback, one folder per library. AppRun adds a
+# folder to LD_LIBRARY_PATH only when the running system does not have that
+# library, so the system's own (driver-matched) libraries are always preferred.
+# Core glibc libraries are never bundled.
+EXCLUDE_RE='^(libc|libm|libdl|libpthread|librt|libutil|libresolv|libnsl|libanl|libcrypt|libBrokenLocale|libthread_db|libnss_[a-z]+|ld-linux[^/]*|ld-[0-9.]+)\.so'
+collect_fallback_libs() {
+    local bin dest ldp list name path n=0
+    bin="$(readlink -f "$1")"; dest="$2"
+    ldp="$(find "$bin" -type d | paste -sd: -)"
+    mkdir -p "$dest"
+    list="$(find "$bin" -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \) \
+                -exec sh -c 'for f; do LD_LIBRARY_PATH="$0" ldd "$f" 2>/dev/null; done' "$ldp" {} + \
+            | awk '$2=="=>" && $3 ~ /^\// {print $1, $3} $2=="=>" && $3=="not" {print $1, "MISSING"}' \
+            | sort -u || true)"
+    while read -r name path; do
+        [ -n "$name" ] || continue
+        if [ "$path" = "MISSING" ]; then
+            warn "$name is needed but not installed here (use ./build_in_docker.sh)."
+            continue
+        fi
+        case "$(readlink -f "$path")" in "$bin"/*) continue ;; esac   # already bundled
+        if printf '%s\n' "$name" | grep -qE "$EXCLUDE_RE"; then continue; fi
+        mkdir -p "$dest/$name"
+        cp -L "$path" "$dest/$name/$name"
+        n=$((n + 1))
+    done <<< "$list"
+    # extra libraries requested by name
+    local lib d
+    for lib in $EXTRA_LIBS; do
+        for d in /usr/lib/"$(uname -m)"-linux-gnu /lib/"$(uname -m)"-linux-gnu /usr/lib64 /usr/lib; do
+            if [ -e "$d/$lib" ]; then
+                mkdir -p "$dest/$lib"; cp -L "$d/$lib" "$dest/$lib/$lib"; n=$((n + 1)); break
+            fi
+        done
+    done
+    info "Stored $n fallback libraries ($(du -sh "$dest" | cut -f1))."
+}
+collect_fallback_libs "$APPDIR/usr/bin/$APP_NAME" "$APPDIR/usr/fallback-libs"
+
+cat > "$APPDIR/AppRun" <<'APPRUN'
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+# Use a bundled fallback library only if the system lacks it
+SYSLIBS="$(PATH="$PATH:/sbin:/usr/sbin" ldconfig -p 2>/dev/null || true)"
+for d in "$HERE"/usr/fallback-libs/*/; do
+    [ -d "$d" ] || continue
+    n="$(basename "$d")"
+    case "$SYSLIBS" in
+        *"$n ("*) ;;
+        *) LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}${d%/}"; export LD_LIBRARY_PATH ;;
+    esac
+done
+exec "$HERE/usr/bin/@APP_NAME@/@APP_NAME@" "$@"
+APPRUN
+sed -i "s/@APP_NAME@/$APP_NAME/g" "$APPDIR/AppRun"
+chmod +x "$APPDIR/AppRun"
+
 # ---- glibc compatibility check -----------------------------------------
 # An AppImage runs on the glibc it was built against or a newer one. Report
 # the newest glibc symbol that any bundled binary needs.
 highest_glibc() {
     local worst="0" v f
     while IFS= read -r f; do
-        v="$(LC_ALL=C objdump -T "$f" 2>/dev/null \
-                | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' \
+        # objdump -p lists every required version. GLIBC_ABI_DT_RELR (packed
+        # relocations) is not a number: it needs glibc 2.36 or newer.
+        v="$(LC_ALL=C objdump -p "$f" 2>/dev/null \
+                | grep -oE 'GLIBC_(ABI_DT_RELR|[0-9][0-9.]*)' \
+                | sed -e 's/^GLIBC_ABI_DT_RELR$/GLIBC_2.36/' -e 's/^GLIBC_//' \
                 | sort -V | tail -n1 || true)"
         [ -n "$v" ] || continue
         if [ "$(printf '%s\n%s\n' "$worst" "$v" | sort -V | tail -n1)" = "$v" ]; then
@@ -166,25 +239,13 @@ highest_glibc() {
     done < <(find "$1" -type f \( -name '*.so' -o -name '*.so.*' -o -perm -u+x \))
     printf '%s' "$worst"
 }
-GLIBC_NEEDED="$(highest_glibc "$BUNDLE")"
+GLIBC_NEEDED="$(highest_glibc "$APPDIR/usr")"
 info "Newest glibc symbol required: $GLIBC_NEEDED (target: $GLIBC_MAX or older)"
 if [ "$GLIBC_NEEDED" != "0" ] \
    && [ "$(printf '%s\n%s\n' "$GLIBC_MAX" "$GLIBC_NEEDED" | sort -V | tail -n1)" != "$GLIBC_MAX" ]; then
-    msg="This build needs glibc $GLIBC_NEEDED, newer than $GLIBC_MAX: it will fail on older distros and in the AppImageHub checks. Build with ./build_in_docker.sh (Ubuntu 22.04)."
+    msg="This build needs glibc $GLIBC_NEEDED, newer than $GLIBC_MAX: it would fail on older distros and in the AppImageHub checks. Build with ./build_in_docker.sh (Ubuntu 22.04). For a build only for this machine: STRICT_GLIBC=0 ./build_appimage.sh"
     if [ "$STRICT_GLIBC" = "1" ]; then die "$msg"; else warn "$msg"; fi
 fi
-
-# ---- AppDir ------------------------------------------------------------
-info "Assembling the AppDir ..."
-mkdir -p "$APPDIR/usr/bin"
-cp -a "$BUNDLE" "$APPDIR/usr/bin/$APP_NAME"
-
-cat > "$APPDIR/AppRun" <<APPRUN
-#!/bin/sh
-HERE="\$(dirname "\$(readlink -f "\$0")")"
-exec "\$HERE/usr/bin/$APP_NAME/$APP_NAME" "\$@"
-APPRUN
-chmod +x "$APPDIR/AppRun"
 
 # Icon: 256x256 PNG drawn by make_app_icon.py (same artwork as the tray icon);
 # if that fails, fall back to an SVG with the same drawing.

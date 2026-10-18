@@ -61,7 +61,7 @@ try:
         QHeaderView, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
         QProgressBar, QPushButton, QSystemTrayIcon, QTableWidget,
         QTableWidgetItem, QVBoxLayout, QWidget)
-except ImportError:
+except ImportError as err_pyside:
     try:
         from PyQt6.QtCore import QObject, Qt, QTimer
         from PyQt6.QtCore import pyqtSignal as Signal
@@ -73,8 +73,14 @@ except ImportError:
             QHeaderView, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
             QProgressBar, QPushButton, QSystemTrayIcon, QTableWidget,
             QTableWidgetItem, QVBoxLayout, QWidget)
-    except ImportError:
-        sys.exit("Qt for Python not found. Install it with:\n  pip install PySide6")
+    except ImportError as err_pyqt:
+        # Show WHY the import failed: a missing system library (libEGL, libGL,
+        # libxkbcommon ...) looks exactly like a missing package otherwise.
+        sys.exit("Qt for Python could not be loaded.\n"
+                 f"  PySide6: {err_pyside}\n"
+                 f"  PyQt6  : {err_pyqt}\n"
+                 "If a package is missing:  pip install PySide6\n"
+                 "If a library (.so) is missing, install it with your package manager.")
 
 try:
     import bluetooth_re_pairing as core

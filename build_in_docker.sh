@@ -19,7 +19,7 @@ fi
 
 PASS=()
 for v in APP_NAME APP_TITLE APP_ID APP_VERSION APP_LICENSE APP_URL APP_SUMMARY \
-         SCREENSHOT_URL QT_PACKAGE EXTRA_ARGS GLIBC_MAX LINT GUI CORE; do
+         SCREENSHOT_URL QT_PACKAGE QT_SPEC EXTRA_LIBS EXTRA_ARGS GLIBC_MAX LINT GUI CORE; do
     if [ -n "${!v:-}" ]; then PASS+=(-e "$v=${!v}"); fi
 done
 
@@ -36,7 +36,10 @@ apt-get install -y --no-install-recommends \
     desktop-file-utils appstream \
     libgl1 libegl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 \
     libglib2.0-0 libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
-    libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0
+    libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 \
+    libxcb-sync1 libxcb-xfixes0 libxcb-xkb1 libxcb-util1 \
+    libxcb-xinput0 libxcb-glx0 libxcb-shm0 libxcb-render0 libx11-xcb1 libxrender1 \
+    libxi6 libsm6 libice6 libfreetype6 libxext6 libpython3.10
 rc=0
 ./build_appimage.sh || rc=$?
 chown -R "$HOST_UID:$HOST_GID" build dist .tools .venv-build-docker 2>/dev/null || true
