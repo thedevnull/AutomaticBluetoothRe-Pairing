@@ -7,3 +7,6 @@ pyvenv.cfg
 lib
 __pycache__
 .tools/appimagetool-x86_64.AppImage
+.venv-build
+.venv-build-docker
+.venv
