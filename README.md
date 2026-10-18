@@ -1,2 +1,2 @@
-# AutomaticBluetoothRe-Pairing
-Multiplataform automatic Re-Pairing bluetooth devices. Works great in Windows and Linux. It's made to re-pair automatically your bluetooth devices, great when you have multiple OS in your device.
+# BluetoothDeviceControl
+Multiplataform automatic administrating bluetooth devices. Works great in Windows and Linux, to automatic repair and manage them. It's great when you have bunch of bluetooth devices and need to pair them everytime you boot in other OS's.
